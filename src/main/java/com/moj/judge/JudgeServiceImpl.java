@@ -8,9 +8,11 @@ import com.moj.judge.codesandbox.CodeSandboxFactory;
 import com.moj.judge.codesandbox.CodeSandboxProxy;
 import com.moj.judge.codesandbox.model.ExecuteCodeRequest;
 import com.moj.judge.codesandbox.model.ExecuteCodeResponse;
+import com.moj.judge.codesandbox.model.ExecuteMessage;
 import com.moj.judge.strategy.JudgeContext;
 import com.moj.model.dto.question.JudgeCase;
 import com.moj.judge.codesandbox.model.JudgeInfo;
+import com.moj.model.enums.JudgeInfoMessageEnum;
 import com.moj.model.entity.Question;
 import com.moj.model.entity.QuestionSubmit;
 import com.moj.model.enums.QuestionSubmitStatusEnum;
@@ -37,7 +39,7 @@ public class JudgeServiceImpl implements JudgeService {
 
     @Override
     public QuestionSubmit doJudge(long questionSubmitId) {
-        //  1. 传入题目提交id，获取到对应的题目，提交信息（包含代码，编程语言等）
+        // 1. 传入题目提交id，获取到对应的题目，提交信息
         QuestionSubmit questionSubmit = questionSubmitService.getById(questionSubmitId);
         if (questionSubmit == null) {
             throw new BusinessException(ErrorCode.NOT_FOUND_ERROR, "提交信息不存在");
@@ -52,6 +54,7 @@ public class JudgeServiceImpl implements JudgeService {
             throw new BusinessException(ErrorCode.OPERATION_ERROR, "题目正在判题中");
         }
 
+        // 2. 更新为判题中
         QuestionSubmit questionSubmitUpdate = new QuestionSubmit();
         questionSubmitUpdate.setId(id);
         questionSubmitUpdate.setStatus(QuestionSubmitStatusEnum.RUNNING.getValue());
@@ -60,7 +63,7 @@ public class JudgeServiceImpl implements JudgeService {
             throw new BusinessException(ErrorCode.SYSTEM_ERROR, "题目状态更新错误");
         }
 
-        //2. 调用沙箱，获取到执行结果
+        // 3. 调用沙箱
         CodeSandbox codeSandbox = CodeSandboxFactory.newInstance(type);
         codeSandbox = new CodeSandboxProxy(codeSandbox);
         String code = questionSubmit.getCode();
@@ -69,28 +72,58 @@ public class JudgeServiceImpl implements JudgeService {
         List<JudgeCase> judgeCases = JSONUtil.toList(judgeCaseStr, JudgeCase.class);
         List<String> inputList = judgeCases.stream().map(JudgeCase::getInput).collect(Collectors.toList());
 
-        ExecuteCodeRequest executeCodeRequest = ExecuteCodeRequest.builder().code(code).language(language).inputList(inputList).build();
+        ExecuteCodeRequest executeCodeRequest = ExecuteCodeRequest.builder()
+                .code(code).language(language).inputList(inputList).build();
         ExecuteCodeResponse executeCodeResponse = codeSandbox.executeCode(executeCodeRequest);
-        JudgeInfo judgeInfo = executeCodeResponse.getJudgeInfo();
-        List<String> outputList = executeCodeResponse.getOutputList();
-        //3. 根据沙箱执行结果，设置题目的判题状态,信息
-        JudgeContext judgeContext = new JudgeContext();
-        judgeContext.setJudgeInfo(judgeInfo);
-        judgeContext.setInputList(inputList);
-        judgeContext.setOutputList(outputList);
-        judgeContext.setJudgeCaseList(judgeCases);
-        judgeContext.setQuestion(question);
-        judgeContext.setQuestionSubmit(questionSubmit);
 
-        JudgeInfo judgeInfoRes = judgeManager.doJudge(judgeContext);
+        // 4. 短路判断：编译/运行/超时错误
+        JudgeInfo judgeInfoRes = new JudgeInfo();
 
-        // 修改数据库中判题结果
+        // 4a. 编译错误
+        ExecuteMessage compileResult = executeCodeResponse.getCompileResult();
+        if (compileResult != null && compileResult.getExitVal() != 0) {
+            judgeInfoRes.setMessage(JudgeInfoMessageEnum.COMPILE_ERROR.getValue());
+            judgeInfoRes.setTime(0L);
+            judgeInfoRes.setMemory(0L);
+        }
+        // 4b. 运行超时
+        else if (executeCodeResponse.getRunResults() != null
+                && executeCodeResponse.getRunResults().stream().anyMatch(r -> Boolean.TRUE.equals(r.getTimeout()))) {
+            JudgeInfo sandboxJudgeInfo = executeCodeResponse.getJudgeInfo();
+            judgeInfoRes.setMessage(JudgeInfoMessageEnum.TIME_LIMIT_EXCEEDED.getValue());
+            judgeInfoRes.setTime(sandboxJudgeInfo != null ? sandboxJudgeInfo.getTime() : 0L);
+            judgeInfoRes.setMemory(sandboxJudgeInfo != null ? sandboxJudgeInfo.getMemory() : 0L);
+        }
+        // 4c. 运行错误
+        else if (executeCodeResponse.getRunResults() != null
+                && executeCodeResponse.getRunResults().stream().anyMatch(r -> r.getExitVal() != null && r.getExitVal() != 0)) {
+            JudgeInfo sandboxJudgeInfo = executeCodeResponse.getJudgeInfo();
+            judgeInfoRes.setMessage(JudgeInfoMessageEnum.RUNTIME_ERROR.getValue());
+            judgeInfoRes.setTime(sandboxJudgeInfo != null ? sandboxJudgeInfo.getTime() : 0L);
+            judgeInfoRes.setMemory(sandboxJudgeInfo != null ? sandboxJudgeInfo.getMemory() : 0L);
+        } else {
+            // 4d. 正常执行 → 策略判题
+            JudgeInfo sandboxJudgeInfo = executeCodeResponse.getJudgeInfo();
+            List<String> outputList = executeCodeResponse.getOutputList();
+
+            JudgeContext judgeContext = new JudgeContext();
+            judgeContext.setJudgeInfo(sandboxJudgeInfo);
+            judgeContext.setInputList(inputList);
+            judgeContext.setOutputList(outputList);
+            judgeContext.setJudgeCaseList(judgeCases);
+            judgeContext.setQuestion(question);
+            judgeContext.setQuestionSubmit(questionSubmit);
+
+            judgeInfoRes = judgeManager.doJudge(judgeContext);
+        }
+
+        // 5. 写回数据库
         questionSubmitUpdate = new QuestionSubmit();
         questionSubmitUpdate.setId(id);
-        int status = "Accepted".equals(judgeInfoRes.getMessage())
-                ? QuestionSubmitStatusEnum.SUCCEED.getValue()
-                : QuestionSubmitStatusEnum.FAILED.getValue();
-        questionSubmitUpdate.setStatus(status);
+        questionSubmitUpdate.setStatus(
+                JudgeInfoMessageEnum.ACCEPTED.getValue().equals(judgeInfoRes.getMessage())
+                        ? QuestionSubmitStatusEnum.SUCCEED.getValue()
+                        : QuestionSubmitStatusEnum.FAILED.getValue());
         questionSubmitUpdate.setJudgeInfo(JSONUtil.toJsonStr(judgeInfoRes));
         update = questionSubmitService.updateById(questionSubmitUpdate);
         if (!update) {
