@@ -1,29 +1,32 @@
-# MOJ Backend
+# MOJ Online Judge — Backend
 
-MOJ（Moj Online Judge）在线判题系统后端，提供用户认证、题库管理、代码提交与自动判题等核心能力。
+MOJ（Moj Online Judge）在线判题系统后端，提供用户认证、题库管理、代码提交、异步判题与判题结果展示等核心能力。
+
+> 🧩 **配套仓库**：判题执行由独立的代码沙箱服务完成 → **[moj-code-sandbox](https://github.com/mothieras/moj-code-sandbox)**（Docker 容器池隔离运行用户代码）。
 
 ## 技术栈
 
 - **Java 21** + **Spring Boot 3.4**
 - **MyBatis Plus** + **MySQL** — 数据持久化
-- **Redis** + **Spring Session** — 分布式登录
+- **Redis** + **Spring Session** — 分布式登录态 + Cache-Aside 缓存（防穿透/雪崩）
+- **RabbitMQ** — 判题流程异步解耦（手动 ACK / 发布确认 / 死信队列兜底）
 - **Knife4j** — API 文档与在线调试
 - **Hutool** / **Commons Lang3** — 通用工具
 
 ## 快速启动
 
 ```bash
-# 1. 创建数据库和表
-mysql -u root -p < sql/create_table.sql
+# 1. 一键拉起依赖中间件（MySQL / Redis / RabbitMQ），首次启动自动建库建表
+docker-compose -f docker-compose.dev.yml up -d
 
-# 2. 修改 application.yml 中的数据库和 Redis 配置
-
-# 3. 启动
+# 2. 启动后端（默认 dev 环境）
 ./mvnw spring-boot:run
 
-# 4. 访问 API 文档
+# 3. 访问 API 文档（Knife4j）
 open http://localhost:8121/api/doc.html
 ```
+
+> 完整判题需配合代码沙箱：将 `codesandbox.type` 设为 `remote` 并启动 [moj-code-sandbox](https://github.com/mothieras/moj-code-sandbox)；仅本地测试主流程可设为 `example`。
 
 ## API 概览
 
@@ -101,3 +104,5 @@ codesandbox:
 ```
 
 多环境配置：`application.yml`（dev 默认）、`application-test.yml`、`application-prod.yml`。
+
+> 生产/测试环境的敏感配置通过环境变量注入、不入库：`MYSQL_PASSWORD`、`KNIFE4J_PASSWORD`。
