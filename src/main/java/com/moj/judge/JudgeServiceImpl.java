@@ -76,33 +76,38 @@ public class JudgeServiceImpl implements JudgeService {
                 .code(code).language(language).inputList(inputList).build();
         ExecuteCodeResponse executeCodeResponse = codeSandbox.executeCode(executeCodeRequest);
 
-        // 4. 短路判断：编译/运行/超时错误
+        // 4. 短路判断：沙箱故障 / 编译错误 / 超时 / 运行错误
         JudgeInfo judgeInfoRes = new JudgeInfo();
-
-        // 4a. 编译错误
         ExecuteMessage compileResult = executeCodeResponse.getCompileResult();
-        if (compileResult != null && compileResult.getExitVal() != 0) {
+        List<ExecuteMessage> runResults = executeCodeResponse.getRunResults();
+
+        // 4a. 沙箱内部错误（compileResult 为空且无 runResults）
+        if (compileResult == null && (runResults == null || runResults.isEmpty())) {
+            judgeInfoRes.setMessage(JudgeInfoMessageEnum.SYSTEM_ERROR.getValue());
+            judgeInfoRes.setTime(0L);
+            judgeInfoRes.setMemory(0L);
+        }
+        // 4b. 编译错误
+        else if (compileResult.getExitVal() != 0) {
             judgeInfoRes.setMessage(JudgeInfoMessageEnum.COMPILE_ERROR.getValue());
             judgeInfoRes.setTime(0L);
             judgeInfoRes.setMemory(0L);
         }
-        // 4b. 运行超时
-        else if (executeCodeResponse.getRunResults() != null
-                && executeCodeResponse.getRunResults().stream().anyMatch(r -> Boolean.TRUE.equals(r.getTimeout()))) {
+        // 4c. 运行超时
+        else if (runResults.stream().anyMatch(r -> Boolean.TRUE.equals(r.getTimeout()))) {
             JudgeInfo sandboxJudgeInfo = executeCodeResponse.getJudgeInfo();
             judgeInfoRes.setMessage(JudgeInfoMessageEnum.TIME_LIMIT_EXCEEDED.getValue());
             judgeInfoRes.setTime(sandboxJudgeInfo != null ? sandboxJudgeInfo.getTime() : 0L);
             judgeInfoRes.setMemory(sandboxJudgeInfo != null ? sandboxJudgeInfo.getMemory() : 0L);
         }
-        // 4c. 运行错误
-        else if (executeCodeResponse.getRunResults() != null
-                && executeCodeResponse.getRunResults().stream().anyMatch(r -> r.getExitVal() != null && r.getExitVal() != 0)) {
+        // 4d. 运行错误
+        else if (runResults.stream().anyMatch(r -> r.getExitVal() != null && r.getExitVal() != 0)) {
             JudgeInfo sandboxJudgeInfo = executeCodeResponse.getJudgeInfo();
             judgeInfoRes.setMessage(JudgeInfoMessageEnum.RUNTIME_ERROR.getValue());
             judgeInfoRes.setTime(sandboxJudgeInfo != null ? sandboxJudgeInfo.getTime() : 0L);
             judgeInfoRes.setMemory(sandboxJudgeInfo != null ? sandboxJudgeInfo.getMemory() : 0L);
         } else {
-            // 4d. 正常执行 → 策略判题
+            // 4e. 正常执行 → 策略判题
             JudgeInfo sandboxJudgeInfo = executeCodeResponse.getJudgeInfo();
             List<String> outputList = executeCodeResponse.getOutputList();
 
