@@ -6,13 +6,20 @@ import com.moj.model.dto.question.JudgeConfig;
 import com.moj.judge.codesandbox.model.JudgeInfo;
 import com.moj.model.entity.Question;
 import com.moj.model.enums.JudgeInfoMessageEnum;
+import org.springframework.stereotype.Component;
 
 import java.util.List;
 
 /**
- * 默认判题策略
+ * Java 判题策略
  */
+@Component
 public class JavaLanguageJudgeStrategy implements JudgeStrategy {
+
+    @Override
+    public List<String> supportedLanguages() {
+        return List.of("java");
+    }
     /**
      * 执行判题
      * @param judgeContext
