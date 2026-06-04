@@ -88,7 +88,7 @@ public class JudgeServiceImpl implements JudgeService {
             judgeInfoRes.setMemory(0L);
         }
         // 4b. 编译错误
-        else if (compileResult.getExitVal() != 0) {
+        else if (compileResult != null && compileResult.getExitVal() != 0) {
             judgeInfoRes.setMessage(JudgeInfoMessageEnum.COMPILE_ERROR.getValue());
             judgeInfoRes.setTime(0L);
             judgeInfoRes.setMemory(0L);
