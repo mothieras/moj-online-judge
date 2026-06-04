@@ -1,0 +1,74 @@
+# 开发环境中间件 —— 配置与 application.yml(dev) 完全对齐，应用代码无需改动
+# 用法:
+#   docker-compose -f docker-compose.dev.yml up -d      # 启动
+#   docker-compose -f docker-compose.dev.yml ps         # 查看状态
+#   docker-compose -f docker-compose.dev.yml down        # 停止(保留数据卷)
+#   docker-compose -f docker-compose.dev.yml down -v     # 停止并删除数据
+version: "3.8"
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: moj-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: "moj_local_dev"
+      MYSQL_DATABASE: moj
+      TZ: Asia/Shanghai
+    command:
+      - --innodb-buffer-pool-size=128M      # 3.8G 内存机器，压低 MySQL 内存占用
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    ports:
+      - "3306:3306"
+    volumes:
+      - moj-mysql-data:/var/lib/mysql
+      # 首次启动自动建库建表(create database moj; use moj; create table ...)
+      - ./sql/create_table.sql:/docker-entrypoint-initdb.d/01-create_table.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-pmoj_local_dev"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  redis:
+    image: redis:7-alpine
+    container_name: moj-redis
+    restart: unless-stopped
+    # app 使用 db2 + 密码 moj_local_dev; 限内存 128m, LRU 淘汰
+    command: ["redis-server", "--requirepass", "moj_local_dev", "--maxmemory", "128mb", "--maxmemory-policy", "allkeys-lru"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - moj-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "moj_local_dev", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: moj-rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+      TZ: Asia/Shanghai
+    ports:
+      - "5672:5672"      # AMQP
+      - "15672:15672"    # 管理台 http://localhost:15672 (guest/guest)
+    volumes:
+      # loopback_users=none: 让 guest 能从宿主机(经 docker 网关)连入, yml 的 guest/guest 不用改
+      - ./rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
+      - moj-rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+
+volumes:
+  moj-mysql-data:
+  moj-redis-data:
+  moj-rabbitmq-data:
