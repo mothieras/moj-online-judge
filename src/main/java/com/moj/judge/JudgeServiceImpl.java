@@ -4,7 +4,7 @@ import cn.hutool.json.JSONUtil;
 import com.moj.common.ErrorCode;
 import com.moj.exception.BusinessException;
 import com.moj.judge.codesandbox.CodeSandbox;
-import com.moj.judge.codesandbox.CodeSandboxFactory;
+import com.moj.judge.codesandbox.CodeSandboxRouter;
 import com.moj.judge.codesandbox.CodeSandboxProxy;
 import com.moj.judge.codesandbox.model.ExecuteCodeRequest;
 import com.moj.judge.codesandbox.model.ExecuteCodeResponse;
@@ -19,7 +19,6 @@ import com.moj.model.enums.QuestionSubmitStatusEnum;
 import com.moj.service.QuestionService;
 import com.moj.service.QuestionSubmitService;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import jakarta.annotation.Resource;
@@ -33,124 +32,140 @@ public class JudgeServiceImpl implements JudgeService {
     private QuestionService questionService;
     @Resource
     private QuestionSubmitService questionSubmitService;
-
     @Resource
     private JudgeManager judgeManager;
-    @Value("${codesandbox.type:example}")
-    private String type;
+    @Resource
+    private CodeSandboxRouter codeSandboxRouter;
 
     @Override
     public QuestionSubmit doJudge(long questionSubmitId) {
-        // 1. 传入题目提交id，获取到对应的题目，提交信息
-        QuestionSubmit questionSubmit = questionSubmitService.getById(questionSubmitId);
-        if (questionSubmit == null) {
+        QuestionSubmit submit = questionSubmitService.getById(questionSubmitId);
+        if (submit == null) {
             throw new BusinessException(ErrorCode.NOT_FOUND_ERROR, "提交信息不存在");
         }
-        Long id = questionSubmit.getId();
-        Long questionId = questionSubmit.getQuestionId();
-        Question question = questionService.getById(questionId);
+        Question question = questionService.getById(submit.getQuestionId());
         if (question == null) {
             throw new BusinessException(ErrorCode.NOT_FOUND_ERROR, "题目不存在");
         }
-        if (!questionSubmit.getStatus().equals(QuestionSubmitStatusEnum.WAITING.getValue())) {
+        if (!submit.getStatus().equals(QuestionSubmitStatusEnum.WAITING.getValue())) {
             throw new BusinessException(ErrorCode.OPERATION_ERROR, "题目正在判题中");
         }
 
-        // 2. 更新为判题中
-        QuestionSubmit questionSubmitUpdate = new QuestionSubmit();
-        questionSubmitUpdate.setId(id);
-        questionSubmitUpdate.setStatus(QuestionSubmitStatusEnum.RUNNING.getValue());
-        boolean update = questionSubmitService.updateById(questionSubmitUpdate);
-        if (!update) {
+        markRunning(submit.getId());
+
+        List<JudgeCase> judgeCases = JSONUtil.toList(question.getJudgeCase(), JudgeCase.class);
+        List<String> inputList = judgeCases.stream().map(JudgeCase::getInput).collect(Collectors.toList());
+        ExecuteCodeRequest req = ExecuteCodeRequest.builder()
+                .code(submit.getCode()).language(submit.getLanguage()).inputList(inputList).build();
+
+        JudgeInfo result;
+        try {
+            ExecuteCodeResponse resp = callSandbox(req);
+            result = classifySandboxResult(resp);
+            if (result == null) {
+                result = applyJudgeStrategy(resp, inputList, judgeCases, submit, question);
+            }
+        } catch (SandboxException e) {
+            log.error("沙箱基础设施异常，提交ID {}，重置为WAITING等待重试", submit.getId(), e);
+            resetToWaiting(submit.getId());
+            throw e;
+        }
+
+        return finishSubmit(submit.getId(), result);
+    }
+
+    private void markRunning(Long submitId) {
+        QuestionSubmit update = new QuestionSubmit();
+        update.setId(submitId);
+        update.setStatus(QuestionSubmitStatusEnum.RUNNING.getValue());
+        if (!questionSubmitService.updateById(update)) {
             throw new BusinessException(ErrorCode.SYSTEM_ERROR, "题目状态更新错误");
         }
+    }
 
-        // 3. 调用沙箱
-        CodeSandbox codeSandbox = CodeSandboxFactory.newInstance(type);
+    private ExecuteCodeResponse callSandbox(ExecuteCodeRequest req) {
+        CodeSandbox codeSandbox = codeSandboxRouter.select();
         codeSandbox = new CodeSandboxProxy(codeSandbox);
-        String code = questionSubmit.getCode();
-        String language = questionSubmit.getLanguage();
-        String judgeCaseStr = question.getJudgeCase();
-        List<JudgeCase> judgeCases = JSONUtil.toList(judgeCaseStr, JudgeCase.class);
-        List<String> inputList = judgeCases.stream().map(JudgeCase::getInput).collect(Collectors.toList());
-
-        ExecuteCodeRequest executeCodeRequest = ExecuteCodeRequest.builder()
-                .code(code).language(language).inputList(inputList).build();
-        JudgeInfo judgeInfoRes = new JudgeInfo();
         try {
-            ExecuteCodeResponse executeCodeResponse = codeSandbox.executeCode(executeCodeRequest);
-
-            // 4. 短路判断：沙箱故障 / 编译错误 / 超时 / 运行错误
-            ExecuteMessage compileResult = executeCodeResponse.getCompileResult();
-            List<ExecuteMessage> runResults = executeCodeResponse.getRunResults();
-
-            // 4a. 沙箱内部错误（compileResult 为空且无 runResults）
-            if (compileResult == null && (runResults == null || runResults.isEmpty())) {
-                judgeInfoRes.setMessage(JudgeInfoMessageEnum.SYSTEM_ERROR.getValue());
-                judgeInfoRes.setTime(0L);
-                judgeInfoRes.setMemory(0L);
-            }
-            // 4b. 编译错误
-            else if (compileResult != null && compileResult.getExitVal() != 0) {
-                judgeInfoRes.setMessage(JudgeInfoMessageEnum.COMPILE_ERROR.getValue());
-                judgeInfoRes.setTime(0L);
-                judgeInfoRes.setMemory(0L);
-            }
-            // 4c. 运行超时
-            else if (runResults.stream().anyMatch(r -> Boolean.TRUE.equals(r.getTimeout()))) {
-                JudgeInfo sandboxJudgeInfo = executeCodeResponse.getJudgeInfo();
-                judgeInfoRes.setMessage(JudgeInfoMessageEnum.TIME_LIMIT_EXCEEDED.getValue());
-                judgeInfoRes.setTime(sandboxJudgeInfo != null ? sandboxJudgeInfo.getTime() : 0L);
-                judgeInfoRes.setMemory(sandboxJudgeInfo != null ? sandboxJudgeInfo.getMemory() : 0L);
-            }
-            // 4d. 运行错误
-            else if (runResults.stream().anyMatch(r -> r.getExitVal() != null && r.getExitVal() != 0)) {
-                JudgeInfo sandboxJudgeInfo = executeCodeResponse.getJudgeInfo();
-                judgeInfoRes.setMessage(JudgeInfoMessageEnum.RUNTIME_ERROR.getValue());
-                judgeInfoRes.setTime(sandboxJudgeInfo != null ? sandboxJudgeInfo.getTime() : 0L);
-                judgeInfoRes.setMemory(sandboxJudgeInfo != null ? sandboxJudgeInfo.getMemory() : 0L);
-            } else {
-                // 4e. 正常执行 → 策略判题
-                JudgeInfo sandboxJudgeInfo = executeCodeResponse.getJudgeInfo();
-                List<String> outputList = executeCodeResponse.getOutputList();
-
-                JudgeContext judgeContext = new JudgeContext();
-                judgeContext.setJudgeInfo(sandboxJudgeInfo);
-                judgeContext.setInputList(inputList);
-                judgeContext.setOutputList(outputList);
-                judgeContext.setJudgeCaseList(judgeCases);
-                judgeContext.setQuestion(question);
-                judgeContext.setQuestionSubmit(questionSubmit);
-
-                judgeInfoRes = judgeManager.doJudge(judgeContext);
-            }
+            return codeSandbox.executeCode(req);
         } catch (Exception e) {
-            // 捕获所有异常直接置 FAILED，不 re-throw。
-            // 代价：沙箱瞬时故障（如网络闪断）不会走 JudgeConsumer 的重试机制。
-            // 选择原因：当前重试机制在 RUNNING 状态下有卡死风险，先保证不卡死。
-            log.error("判题异常，提交ID {}", id, e);
-            questionSubmitUpdate = new QuestionSubmit();
-            questionSubmitUpdate.setId(id);
-            questionSubmitUpdate.setStatus(QuestionSubmitStatusEnum.FAILED.getValue());
-            JudgeInfo errorJudgeInfo = new JudgeInfo();
-            errorJudgeInfo.setMessage(JudgeInfoMessageEnum.SYSTEM_ERROR.getValue());
-            questionSubmitUpdate.setJudgeInfo(JSONUtil.toJsonStr(errorJudgeInfo));
-            questionSubmitService.updateById(questionSubmitUpdate);
-            return questionSubmitService.getById(id);
+            throw new SandboxException("沙箱调用失败", e);
         }
+    }
 
-        // 5. 写回数据库
-        questionSubmitUpdate = new QuestionSubmit();
-        questionSubmitUpdate.setId(id);
-        questionSubmitUpdate.setStatus(
-                JudgeInfoMessageEnum.ACCEPTED.getValue().equals(judgeInfoRes.getMessage())
+    /**
+     * 短路检查沙箱返回结果：编译错误、系统错误、超时、运行错误。
+     * 返回 null 表示执行正常，需要调用策略判题。
+     */
+    private JudgeInfo classifySandboxResult(ExecuteCodeResponse resp) {
+        ExecuteMessage compileResult = resp.getCompileResult();
+        List<ExecuteMessage> runResults = resp.getRunResults();
+
+        if (compileResult == null && (runResults == null || runResults.isEmpty())) {
+            JudgeInfo info = new JudgeInfo();
+            info.setMessage(JudgeInfoMessageEnum.SYSTEM_ERROR.getValue());
+            info.setTime(0L);
+            info.setMemory(0L);
+            return info;
+        }
+        if (compileResult != null && compileResult.getExitVal() != 0) {
+            JudgeInfo info = new JudgeInfo();
+            info.setMessage(JudgeInfoMessageEnum.COMPILE_ERROR.getValue());
+            info.setTime(0L);
+            info.setMemory(0L);
+            return info;
+        }
+        if (runResults.stream().anyMatch(r -> Boolean.TRUE.equals(r.getTimeout()))) {
+            JudgeInfo sandboxJudgeInfo = resp.getJudgeInfo();
+            JudgeInfo info = new JudgeInfo();
+            info.setMessage(JudgeInfoMessageEnum.TIME_LIMIT_EXCEEDED.getValue());
+            info.setTime(sandboxJudgeInfo != null ? sandboxJudgeInfo.getTime() : 0L);
+            info.setMemory(sandboxJudgeInfo != null ? sandboxJudgeInfo.getMemory() : 0L);
+            return info;
+        }
+        if (runResults.stream().anyMatch(r -> r.getExitVal() != null && r.getExitVal() != 0)) {
+            JudgeInfo sandboxJudgeInfo = resp.getJudgeInfo();
+            JudgeInfo info = new JudgeInfo();
+            info.setMessage(JudgeInfoMessageEnum.RUNTIME_ERROR.getValue());
+            info.setTime(sandboxJudgeInfo != null ? sandboxJudgeInfo.getTime() : 0L);
+            info.setMemory(sandboxJudgeInfo != null ? sandboxJudgeInfo.getMemory() : 0L);
+            return info;
+        }
+        return null;
+    }
+
+    private JudgeInfo applyJudgeStrategy(ExecuteCodeResponse resp, List<String> inputList,
+                                          List<JudgeCase> judgeCases, QuestionSubmit submit, Question question) {
+        JudgeContext ctx = new JudgeContext();
+        ctx.setJudgeInfo(resp.getJudgeInfo());
+        ctx.setInputList(inputList);
+        ctx.setOutputList(resp.getOutputList());
+        ctx.setJudgeCaseList(judgeCases);
+        ctx.setQuestion(question);
+        ctx.setQuestionSubmit(submit);
+        return judgeManager.doJudge(ctx);
+    }
+
+    private void resetToWaiting(Long submitId) {
+        QuestionSubmit update = new QuestionSubmit();
+        update.setId(submitId);
+        update.setStatus(QuestionSubmitStatusEnum.WAITING.getValue());
+        if (!questionSubmitService.updateById(update)) {
+            throw new BusinessException(ErrorCode.SYSTEM_ERROR, "重置状态为WAITING失败");
+        }
+    }
+
+    private QuestionSubmit finishSubmit(Long submitId, JudgeInfo judgeInfo) {
+        QuestionSubmit update = new QuestionSubmit();
+        update.setId(submitId);
+        update.setStatus(
+                JudgeInfoMessageEnum.ACCEPTED.getValue().equals(judgeInfo.getMessage())
                         ? QuestionSubmitStatusEnum.SUCCEED.getValue()
                         : QuestionSubmitStatusEnum.FAILED.getValue());
-        questionSubmitUpdate.setJudgeInfo(JSONUtil.toJsonStr(judgeInfoRes));
-        update = questionSubmitService.updateById(questionSubmitUpdate);
-        if (!update) {
+        update.setJudgeInfo(JSONUtil.toJsonStr(judgeInfo));
+        if (!questionSubmitService.updateById(update)) {
             throw new BusinessException(ErrorCode.SYSTEM_ERROR, "题目状态更新错误");
         }
-        return questionSubmitService.getById(id);
+        return questionSubmitService.getById(submitId);
     }
 }

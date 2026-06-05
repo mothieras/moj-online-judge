@@ -1,6 +1,7 @@
 package com.moj.consumer;
 
 import com.moj.judge.JudgeService;
+import com.moj.judge.SandboxException;
 import com.moj.model.entity.QuestionSubmit;
 import com.moj.model.enums.QuestionSubmitStatusEnum;
 import com.moj.service.QuestionSubmitService;
@@ -48,10 +49,16 @@ public class JudgeConsumer {
             }
             judgeService.doJudge(submitId);
             channel.basicAck(deliveryTag, false);
+        } catch (SandboxException e) {
+            log.error("提交 {} 沙箱基础设施异常，将重试", submitId, e);
+            if (submitId != null) {
+                handleRetry(message, deliveryTag, submitId, channel);
+            } else {
+                channel.basicNack(deliveryTag, false, false);
+            }
         } catch (Exception e) {
             log.error("提交 {} 判题失败", submitId, e);
             if (submitId != null) {
-                // Safety net: ensure submission is not stuck in RUNNING state
                 try {
                     QuestionSubmit submit = questionSubmitService.getById(submitId);
                     if (submit != null && QuestionSubmitStatusEnum.RUNNING.getValue().equals(submit.getStatus())) {
@@ -62,9 +69,8 @@ public class JudgeConsumer {
                     }
                 } catch (Exception ignored) {
                 }
-                handleRetry(message, deliveryTag, submitId, channel);
+                channel.basicNack(deliveryTag, false, false);
             } else {
-                log.error("无法解析提交ID，消息进入死信");
                 channel.basicNack(deliveryTag, false, false);
             }
         }

@@ -25,6 +25,9 @@ public class RemoteCodeSandbox implements CodeSandbox {
     @Value("${codesandbox.remote.auth-secret:secretKey}")
     private String authSecret;
 
+    @Value("${codesandbox.remote.timeout:35000}")
+    private int timeoutMs;
+
     /**
      * 执行代码
      *
@@ -37,6 +40,7 @@ public class RemoteCodeSandbox implements CodeSandbox {
         String responseBody = HttpUtil.createPost(sandboxUrl)
                 .header(AUTH_REQUEST_HEADER, authSecret)
                 .body(json)
+                .timeout(timeoutMs)
                 .execute().body();
         if (StringUtils.isBlank(responseBody)) {
             throw new BusinessException(ErrorCode.API_REQUEST_ERROR, "executeCode remoteSandbox error");

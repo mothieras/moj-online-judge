@@ -10,7 +10,10 @@ import org.springframework.stereotype.Component;
 
 /**
  * 代码沙箱工厂（根据字符串参数创建指定的代码沙箱实现）
+ *
+ * @deprecated 使用 {@link CodeSandboxRouter} 替代，Router 是标准 Spring Bean，更符合 DI 约定且易于测试。
  */
+@Deprecated
 @Component
 public class CodeSandboxFactory implements ApplicationContextAware {
     private static ApplicationContext applicationContext;
