@@ -24,6 +24,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.beans.BeanUtils;
 import org.springframework.stereotype.Service;
+import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.util.DigestUtils;
 
 /**
@@ -34,8 +35,9 @@ import org.springframework.util.DigestUtils;
 public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements UserService {
 
     /**
-     * 盐值，混淆密码
+     * 旧 MD5 盐值（已废弃，改用 BCrypt）。仅保留用于日志提示。
      */
+    @Deprecated
     public static final String SALT = "moj";
 
     @Override
@@ -62,8 +64,8 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
             if (count > 0) {
                 throw new BusinessException(ErrorCode.PARAMS_ERROR, "账号重复");
             }
-            // 2. 加密
-            String encryptPassword = DigestUtils.md5DigestAsHex((SALT + userPassword).getBytes());
+            // 2. BCrypt 加密（自动内置随机盐）
+            String encryptPassword = new BCryptPasswordEncoder().encode(userPassword);
             // 3. 插入数据
             User user = new User();
             user.setUserAccount(userAccount);
@@ -88,16 +90,32 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
         if (userPassword.length() < 8) {
             throw new BusinessException(ErrorCode.PARAMS_ERROR, "密码错误");
         }
-        // 2. 加密
-        String encryptPassword = DigestUtils.md5DigestAsHex((SALT + userPassword).getBytes());
-        // 查询用户是否存在
+        // 2. 查询用户
         QueryWrapper<User> queryWrapper = new QueryWrapper<>();
         queryWrapper.eq("userAccount", userAccount);
-        queryWrapper.eq("userPassword", encryptPassword);
         User user = this.baseMapper.selectOne(queryWrapper);
         // 用户不存在
         if (user == null) {
-            log.info("user login failed, userAccount cannot match userPassword");
+            log.info("user login failed, userAccount not found: {}", userAccount);
+            throw new BusinessException(ErrorCode.PARAMS_ERROR, "用户不存在或密码错误");
+        }
+        // BCrypt 密码验证，兼容旧 MD5 密码
+        BCryptPasswordEncoder encoder = new BCryptPasswordEncoder();
+        boolean passwordOk;
+        try {
+            passwordOk = encoder.matches(userPassword, user.getUserPassword());
+        } catch (IllegalArgumentException e) {
+            // 旧 MD5 密码格式不兼容 BCrypt，回退 MD5 比对并自动升级
+            String md5Hash = DigestUtils.md5DigestAsHex((SALT + userPassword).getBytes());
+            passwordOk = md5Hash.equalsIgnoreCase(user.getUserPassword());
+            if (passwordOk) {
+                user.setUserPassword(encoder.encode(userPassword));
+                this.updateById(user);
+                log.info("User {} password upgraded from MD5 to BCrypt", userAccount);
+            }
+        }
+        if (!passwordOk) {
+            log.info("user login failed, password mismatch for userAccount: {}", userAccount);
             throw new BusinessException(ErrorCode.PARAMS_ERROR, "用户不存在或密码错误");
         }
         // 3. 记录用户的登录态

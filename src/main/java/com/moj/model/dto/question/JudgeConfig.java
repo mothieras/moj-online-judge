@@ -14,11 +14,11 @@ public class JudgeConfig implements Serializable {
      */
     private Long timeLimit;
     /**
-     * 内存限制  KB
+     * 内存限制 MB
      */
     private Long memoryLimit;
     /**
-     * 堆栈限制  KB
+     * 堆栈限制 KB
      */
     private Long stackLimit;
 }

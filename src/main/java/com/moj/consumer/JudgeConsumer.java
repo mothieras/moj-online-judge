@@ -51,6 +51,17 @@ public class JudgeConsumer {
         } catch (Exception e) {
             log.error("提交 {} 判题失败", submitId, e);
             if (submitId != null) {
+                // Safety net: ensure submission is not stuck in RUNNING state
+                try {
+                    QuestionSubmit submit = questionSubmitService.getById(submitId);
+                    if (submit != null && QuestionSubmitStatusEnum.RUNNING.getValue().equals(submit.getStatus())) {
+                        QuestionSubmit update = new QuestionSubmit();
+                        update.setId(submitId);
+                        update.setStatus(QuestionSubmitStatusEnum.FAILED.getValue());
+                        questionSubmitService.updateById(update);
+                    }
+                } catch (Exception ignored) {
+                }
                 handleRetry(message, deliveryTag, submitId, channel);
             } else {
                 log.error("无法解析提交ID，消息进入死信");

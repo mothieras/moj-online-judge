@@ -74,3 +74,9 @@ knife4j:
 # 代码沙箱配置
 codesandbox:
   type: remote
+  remote:
+    url: http://localhost:8090/executeCode
+    auth-secret: secretKey
+# 跨域配置
+cors:
+  allowed-origins: http://localhost:3000

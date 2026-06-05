@@ -66,6 +66,13 @@ public class QuestionSubmitServiceImpl extends ServiceImpl<QuestionSubmitMapper,
         if (languageEnum == null) {
             throw new BusinessException(ErrorCode.PARAMS_ERROR, "编译语言错误");
         }
+        String code = questionSubmitAddRequest.getCode();
+        if (StringUtils.isBlank(code)) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR, "代码不能为空");
+        }
+        if (code.length() > 65536) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR, "代码长度不能超过 65536 字符");
+        }
         long questionId = questionSubmitAddRequest.getQuestionId();
         // 判断实体是否存在，根据类别获取实体
         Question question = questionService.getById(questionId);

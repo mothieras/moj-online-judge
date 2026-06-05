@@ -3,11 +3,23 @@ package com.moj.judge.codesandbox;
 import com.moj.judge.codesandbox.impl.ExampleCodeSandbox;
 import com.moj.judge.codesandbox.impl.RemoteCodeSandbox;
 import com.moj.judge.codesandbox.impl.ThirdPartyCodeSandbox;
+import org.springframework.beans.BeansException;
+import org.springframework.context.ApplicationContext;
+import org.springframework.context.ApplicationContextAware;
+import org.springframework.stereotype.Component;
 
 /**
  * 代码沙箱工厂（根据字符串参数创建指定的代码沙箱实现）
  */
-public class CodeSandboxFactory {
+@Component
+public class CodeSandboxFactory implements ApplicationContextAware {
+    private static ApplicationContext applicationContext;
+
+    @Override
+    public void setApplicationContext(ApplicationContext context) throws BeansException {
+        applicationContext = context;
+    }
+
     /**
      * 创建代码沙箱实例
      *
@@ -17,7 +29,7 @@ public class CodeSandboxFactory {
     public static CodeSandbox newInstance(String type) {
         switch (type) {
             case "remote":
-                return new RemoteCodeSandbox();
+                return applicationContext.getBean(RemoteCodeSandbox.class);
             case "thirdParty":
                 return new ThirdPartyCodeSandbox();
             default:
