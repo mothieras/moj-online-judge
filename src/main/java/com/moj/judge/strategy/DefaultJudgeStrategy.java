@@ -49,7 +49,7 @@ public class DefaultJudgeStrategy implements JudgeStrategy {
         // 依次判断每项与预期是否相等
         for (int i = 0; i < judgeCaseList.size(); i++) {
             JudgeCase judgeCase = judgeCaseList.get(i);
-            if (!judgeCase.getOutput().equals(outputList.get(i))) {
+            if (!judgeCase.getOutput().trim().equals(outputList.get(i).trim())) {
                 judgeInfoMessageEnum = JudgeInfoMessageEnum.WRONG_ANSWER;
                 judgeInfoResponse.setMessage(judgeInfoMessageEnum.getValue());
 
