@@ -42,8 +42,10 @@ import java.util.stream.Collectors;
 public class QuestionServiceImpl extends ServiceImpl<QuestionMapper, Question>
         implements QuestionService {
 
-    /** 题目详情缓存 key 前缀，key 构造统一收敛在这里 */
+    /** 题目详情缓存 key 前缀 */
     private static final String QUESTION_VO_CACHE_PREFIX = "question:vo:";
+    /** 题目列表缓存 key 前缀 */
+    private static final String QUESTION_LIST_CACHE_PREFIX = "question:list:vo:";
     /** 空值占位标记：表示「该 id 在库中确实不存在」，用于防缓存穿透 */
     private static final String NULL_SENTINEL = "__NULL__";
     /** 正常值缓存基础 TTL（秒）= 30 分钟 */
@@ -52,6 +54,10 @@ public class QuestionServiceImpl extends ServiceImpl<QuestionMapper, Question>
     private static final int CACHE_TTL_JITTER_SECONDS = 5 * 60;
     /** 空值占位 TTL（秒）= 60 秒 */
     private static final long NULL_CACHE_TTL_SECONDS = 60;
+    /** 列表缓存 TTL（秒）= 5 分钟，比详情短 */
+    private static final long LIST_CACHE_TTL_SECONDS = 5 * 60;
+    /** 列表缓存 TTL 抖动上限（秒）= 2 分钟 */
+    private static final int LIST_CACHE_TTL_JITTER_SECONDS = 2 * 60;
 
     @Resource
     private UserService userService;
@@ -219,6 +225,62 @@ public class QuestionServiceImpl extends ServiceImpl<QuestionMapper, Question>
         } catch (Exception e) {
             log.warn("删除题目缓存失败 id={}", id, e);
         }
+    }
+
+    @Override
+    public Page<QuestionVO> getQuestionVOPageWithCache(QuestionQueryRequest req, HttpServletRequest request) {
+        // 仅缓存无筛选条件的默认查询，带筛选的直查 DB
+        if (!isDefaultQuery(req)) {
+            Page<Question> questionPage = this.page(
+                    new Page<>(req.getCurrent(), req.getPageSize()),
+                    this.getQueryWrapper(req));
+            return this.getQuestionVOPage(questionPage, request);
+        }
+        String key = QUESTION_LIST_CACHE_PREFIX + req.getCurrent() + ":" + req.getPageSize()
+                + ":" + req.getSortField() + ":" + req.getSortOrder();
+        // 1. 读缓存
+        Object cached = null;
+        try {
+            cached = redisTemplate.opsForValue().get(key);
+        } catch (Exception e) {
+            log.warn("读列表缓存失败，降级查库 key={}", key, e);
+        }
+        if (cached instanceof Page) {
+            @SuppressWarnings("unchecked")
+            Page<QuestionVO> page = (Page<QuestionVO>) cached;
+            return page;
+        }
+        // 2. 查库
+        Page<Question> questionPage = this.page(
+                new Page<>(req.getCurrent(), req.getPageSize()),
+                this.getQueryWrapper(req));
+        Page<QuestionVO> result = this.getQuestionVOPage(questionPage, request);
+        // 3. 回填（短 TTL + 抖动）
+        long ttl = LIST_CACHE_TTL_SECONDS + ThreadLocalRandom.current().nextInt(LIST_CACHE_TTL_JITTER_SECONDS + 1);
+        safeSet(key, result, ttl);
+        return result;
+    }
+
+    @Override
+    public void evictQuestionListCache() {
+        try {
+            var keys = redisTemplate.keys(QUESTION_LIST_CACHE_PREFIX + "*");
+            if (keys != null && !keys.isEmpty()) {
+                redisTemplate.delete(keys);
+            }
+        } catch (Exception e) {
+            log.warn("删除列表缓存失败", e);
+        }
+    }
+
+    /** 是否无筛选条件的默认查询（仅分页 + 排序，无 title/content/tags 等过滤） */
+    private boolean isDefaultQuery(QuestionQueryRequest req) {
+        return req.getId() == null
+                && req.getUserId() == null
+                && StringUtils.isBlank(req.getTitle())
+                && StringUtils.isBlank(req.getContent())
+                && StringUtils.isBlank(req.getAnswer())
+                && CollUtil.isEmpty(req.getTags());
     }
 
     /** 写缓存（失败仅告警、吞掉，不影响主流程） */

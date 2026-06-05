@@ -67,4 +67,18 @@ public interface QuestionService extends IService<Question> {
      * @param id 题目 id
      */
     void evictQuestionVOCache(long id);
+
+    /**
+     * 分页获取题目封装（带 Redis 缓存，仅缓存无筛选条件的默认查询）
+     *
+     * @param questionQueryRequest 查询条件
+     * @param request              HTTP 请求
+     * @return 题目 VO 分页
+     */
+    Page<QuestionVO> getQuestionVOPageWithCache(QuestionQueryRequest questionQueryRequest, HttpServletRequest request);
+
+    /**
+     * 失效所有题目列表缓存（增/删/改成功后调用）
+     */
+    void evictQuestionListCache();
 }

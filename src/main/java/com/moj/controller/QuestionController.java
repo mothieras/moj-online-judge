@@ -82,6 +82,7 @@ public class QuestionController {
         boolean result = questionService.save(question);
         ThrowUtils.throwIf(!result, ErrorCode.OPERATION_ERROR);
         long newQuestionId = question.getId();
+        questionService.evictQuestionListCache();
         return ResultUtils.success(newQuestionId);
     }
 
@@ -109,6 +110,7 @@ public class QuestionController {
         boolean b = questionService.removeById(id);
         if (b) {
             questionService.evictQuestionVOCache(id);
+            questionService.evictQuestionListCache();
         }
         return ResultUtils.success(b);
     }
@@ -148,6 +150,7 @@ public class QuestionController {
         boolean result = questionService.updateById(question);
         if (result) {
             questionService.evictQuestionVOCache(id);
+            questionService.evictQuestionListCache();
         }
         return ResultUtils.success(result);
     }
@@ -222,9 +225,8 @@ public class QuestionController {
         long size = questionQueryRequest.getPageSize();
         // 限制爬虫
         ThrowUtils.throwIf(size > 20, ErrorCode.PARAMS_ERROR);
-        Page<Question> questionPage = questionService.page(new Page<>(current, size),
-                questionService.getQueryWrapper(questionQueryRequest));
-        return ResultUtils.success(questionService.getQuestionVOPage(questionPage, request));
+        Page<QuestionVO> questionVOPage = questionService.getQuestionVOPageWithCache(questionQueryRequest, request);
+        return ResultUtils.success(questionVOPage);
     }
 
     /**
@@ -292,6 +294,7 @@ public class QuestionController {
         boolean result = questionService.updateById(question);
         if (result) {
             questionService.evictQuestionVOCache(id);
+            questionService.evictQuestionListCache();
         }
         return ResultUtils.success(result);
     }
